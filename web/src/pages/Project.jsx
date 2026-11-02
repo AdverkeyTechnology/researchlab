@@ -116,7 +116,7 @@ function Members({ project, members, onChange }) {
             <li className="row static" key={m.email}>
               <Avatar email={m.email} size={30} />
               <div className="t"><div className="title">{m.email}</div><div className="sub">Added {timeAgo(m.addedAt)}</div></div>
-              <Button size="sm" variant="ghost" icon={LuLink} onClick={() => makeLink(m.email)} title="Create a single-use sign-in link">Sign-in link</Button>
+              <Button size="sm" variant="ghost" icon={LuLink} onClick={() => makeLink(m.email)} title="Get a sign-in link">Sign-in link</Button>
               <button className="iconbtn danger" title={`Remove ${m.email}`} aria-label={`Remove ${m.email}`} onClick={() => remove(m.email)}><LuTrash2 /></button>
             </li>
           ))}</ul>
@@ -133,7 +133,7 @@ function Members({ project, members, onChange }) {
       </aside>
       {link && (
         <Modal title="Sign-in link" onClose={() => setLink(null)}>
-          <p className="muted">Send this to <strong>{link.email}</strong> over chat or email. It signs them in once and expires in {link.expiresInHours} hours.</p>
+          <p className="muted">Send this to <strong>{link.email}</strong> over chat or email. {link.expiresInHours ? `It signs them in once and expires in ${link.expiresInHours} hours.` : 'They must sign in with this email address using Clerk.'}</p>
           <CopyField value={link.url} label="Copy link" />
         </Modal>
       )}

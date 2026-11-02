@@ -3,12 +3,19 @@ import { upload as uploadBlob } from '@vercel/blob/client';
 // server requires (blocks cross-site form posts).
 const HEADER = { 'X-Requested-With': 'research-hub' };
 
+let tokenGetter;
+export function setTokenGetter(getter) { tokenGetter = getter; }
+async function authHeaders() {
+  const token = await tokenGetter?.();
+  return { ...HEADER, ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
 export class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
 async function request(method, url, body) {
-  const opts = { method, headers: { ...HEADER }, credentials: 'same-origin' };
+  const opts = { method, headers: await authHeaders(), credentials: 'same-origin' };
   if (body instanceof FormData) opts.body = body;
   else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
   const res = await fetch(url, opts);
@@ -30,17 +37,18 @@ export const api = {
       if(file.size>100*1024*1024) throw new ApiError(413,'Maximum file size is 100 MB.');
       const init=await request('POST',url.replace(/\/reports$/, '/uploads'),{filename:file.name});
       if(init.direct) {
-        await uploadBlob(init.pathname,file,{access:'private',handleUploadUrl:'/api/app/blob/upload',headers:HEADER,multipart:true,onUploadProgress:ev=>onProgress?.(ev.percentage/100)});
+        await uploadBlob(init.pathname,file,{access:'private',handleUploadUrl:'/api/app/blob/upload',headers:await authHeaders(),multipart:true,onUploadProgress:ev=>onProgress?.(ev.percentage/100)});
         const fields=Object.fromEntries(formData.entries()); delete fields.file;
         fields.allowed=formData.getAll('allowed'); fields.uploadId=init.id;
         return request('POST',url,fields);
       }
     }
 
+    const headers = await authHeaders();
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', url);
-      xhr.setRequestHeader('X-Requested-With', HEADER['X-Requested-With']);
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
       xhr.upload.onprogress = (e) => e.lengthComputable && onProgress && onProgress(e.loaded / e.total);
       xhr.onload = () => {
         let data = {}; try { data = JSON.parse(xhr.responseText); } catch {}
