@@ -4,6 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const auth = require('./lib/auth');
+const clerk = require('./lib/clerk');
 const store = require('./lib/store');
 const md = require('./lib/markdown');
 const {
@@ -18,7 +19,7 @@ const APP_NAME = process.env.APP_NAME || 'Research Hub';
 const COOKIE = 'rh_session';
 const SECURE_COOKIE = !!process.env.VERCEL || /^https:/.test(process.env.BASE_URL || '');
 const DIST = path.join(__dirname, 'web', 'dist');
-if (!auth.ADMIN_PASSWORD) console.warn('⚠  ADMIN_PASSWORD is not set — admin password sign-in is disabled. Admins can still sign in with an email code.');
+if (!clerk.enabled() && !auth.ADMIN_PASSWORD) console.warn('⚠  ADMIN_PASSWORD is not set — admin password sign-in is disabled. Admins can still sign in with an email code.');
 if (!fs.existsSync(path.join(DIST, 'index.html'))) console.warn('⚠  web/dist is missing — run `npm run build` to build the React app.');
 
 // ---------------- router ----------------
@@ -126,11 +127,16 @@ const membersOut = async projectId => (await store.members(projectId)).map(m => 
 }));
 
 // ================= session API for the React app =================
+route('GET', '/api/app/auth-config', ctx => {
+  if (clerk.enabled()) clerk.config();
+  json(ctx.res, { publishableKey: process.env.CLERK_PUBLISHABLE_KEY || null });
+});
 route('GET', '/api/app/me', ctx => json(ctx.res, {
   user: ctx.user,
   appName: APP_NAME,
   emailConfigured: !!process.env.RESEND_API_KEY,
-  passwordLogin: !!auth.ADMIN_PASSWORD,
+  passwordLogin: !clerk.enabled() && !!auth.ADMIN_PASSWORD,
+  authProvider: clerk.enabled() ? 'clerk' : 'legacy',
   setupRequired: !process.env.DATABASE_URL && process.env.DB_TEST_MODE !== 'pglite'
 }));
 route('POST', '/api/app/login/email', async ctx => {
@@ -208,7 +214,7 @@ async function notify(ctx, project, emails) {
   if (!emails.length || !ctx.body.notify) return;
   for (const e of emails) {
     try {
-      await auth.sendEmail(e, `You've been given access to “${project.name}”`, `You now have access to the research project “${project.name}” on ${APP_NAME}.\n\nSign in with this email address at ${baseUrl(ctx.req)}/login — you'll get a one-time code.`);
+      await auth.sendEmail(e, `You've been given access to “${project.name}”`, `You now have access to the research project “${project.name}” on ${APP_NAME}.\n\nSign in at ${baseUrl(ctx.req)}/login using the email address that was granted access.`);
     } catch (err) {
       console.error('invite email failed:', err.message);
     }
@@ -277,8 +283,8 @@ route('POST', '/api/app/projects/:slug/members/:email/link', async ctx => {
   need(await store.isMember(p.id, email), 404, 'Not a member of this project.');
   json(ctx.res, {
     email,
-    url: `${baseUrl(ctx.req)}/auth/link/${await auth.issueLoginLink(email)}`,
-    expiresInHours: 72
+    url: clerk.enabled() ? `${baseUrl(ctx.req)}/login` : `${baseUrl(ctx.req)}/auth/link/${await auth.issueLoginLink(email)}`,
+    expiresInHours: clerk.enabled() ? null : 72
   });
 });
 async function reportFromInput(fields, files, projectId, email) {
@@ -600,6 +606,13 @@ const STATIC_TYPES = {
   '.woff2': 'font/woff2'
 };
 const APP_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'; frame-src 'self'; frame-ancestors 'self'; form-action 'self'; base-uri 'none'; object-src 'none'";
+function clerkCsp() {
+  const { publishableKey } = clerk.config();
+  const host = Buffer.from(publishableKey.replace(/^pk_(test|live)_/, ''), 'base64').toString().replace(/\$$/, '');
+  if (!/^[a-zA-Z0-9.-]+$/.test(host)) throw new Error('Invalid Clerk publishable key');
+  const origin = `https://${host}`;
+  return `default-src 'self'; script-src 'self' ${origin} https://challenges.cloudflare.com; connect-src 'self' ${origin} https://clerk-telemetry.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://img.clerk.com; worker-src 'self' blob:; media-src 'self'; frame-src 'self' ${origin} https://challenges.cloudflare.com; frame-ancestors 'self'; form-action 'self'; base-uri 'none'; object-src 'none'`;
+}
 function serveStatic(req, res, pathname) {
   const rel = path.normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, '');
   let file = path.join(DIST, rel);
@@ -617,7 +630,7 @@ function serveStatic(req, res, pathname) {
   send(res, 200, fs.readFileSync(file), {
     'Content-Type': STATIC_TYPES[path.extname(file)] || 'application/octet-stream',
     'Cache-Control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
-    'Content-Security-Policy': APP_CSP
+    'Content-Security-Policy': clerk.enabled() ? clerkCsp() : APP_CSP
   });
 }
 
@@ -638,7 +651,10 @@ async function handler(req, res) {
     params: {}
   };
   try {
-    ctx.user = await auth.getSession(cookies[COOKIE]);
+    if (clerk.enabled()) {
+      need(!p.startsWith('/api/app/login/') && !p.startsWith('/auth/link/'), 410, 'Please sign in with Clerk.');
+      if ((p.startsWith('/api/app/') && p !== '/api/app/auth-config') || /^\/r\/[^/]+\/raw\/?$/.test(p)) ctx.user = await clerk.getUser(req);
+    } else ctx.user = await auth.getSession(cookies[COOKIE]);
     if (p.startsWith('/api/v1/')) {
       const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || req.headers['x-api-key'];
       need(await auth.checkApiToken(token), 401, 'Missing or invalid API token. Send `Authorization: Bearer <token>` — create one under “Push from LLM”.');
